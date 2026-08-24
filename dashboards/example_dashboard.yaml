@@ -1,0 +1,39 @@
+# Example Lovelace card(s) for the Newlab Go BLE Light entity.
+#
+# Replace `light.YOUR_ENTITY_ID` below with your actual entity_id (Settings ->
+# Devices & Services -> Devices -> your light -> the light.* entity, or
+# Settings -> Entities and filter by "Newlab"/"Sibylla"). The entity name
+# comes from the title you gave the device during the config flow confirm
+# step, so it varies per install - there's no fixed default to hardcode here.
+#
+# ColorMode.COLOR_TEMP is natively supported by Lovelace's built-in `light`
+# and `tile` cards - both already render an on/off toggle, a brightness
+# slider, AND a color-temperature slider with zero extra front-end
+# dependencies or custom cards required.
+
+# --- Option A: classic detailed light card (toggle + big brightness slider +
+#     CCT slider, all visible at once, no extra tap needed) ---
+type: light
+entity: light.YOUR_ENTITY_ID
+name: Sibylla M
+
+# --- Option B: modern tile card (compact row for a dashboard with many
+#     entities - tap it to expand brightness/CCT controls) ---
+# type: tile
+# entity: light.YOUR_ENTITY_ID
+# name: Sibylla M
+# features:
+#   - type: light-brightness
+#   - type: light-color-temp
+
+# --- Option C: grouped into a small area card alongside other lights ---
+# type: vertical-stack
+# cards:
+#   - type: heading
+#     heading: Living room lighting
+#   - type: tile
+#     entity: light.YOUR_ENTITY_ID
+#     name: Sibylla M
+#     features:
+#       - type: light-brightness
+#       - type: light-color-temp

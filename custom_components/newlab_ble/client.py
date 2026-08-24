@@ -15,11 +15,13 @@ the vendor app (see the project's RE notes for the full writeup):
   - CHAR_BRIGHTNESS_CCT carries two independent byte fields in one 4-byte
     write - see const.py for the exact layout.
 
-This device exposes no reliable read-back (no working Read or Notify
-observed for current state across any capture), so state is tracked
-optimistically here and assumed authoritative unless a write fails or the
-connection drops - the same approach used by comparable BLE light
-integrations (e.g. elkbledom) that also lack real state feedback.
+State is tracked optimistically (assumed authoritative immediately after a
+successful write, for instant UI feedback) AND reconciled periodically via
+a real GATT Read (see async_refresh_state) - confirmed 2026-08-25 by direct
+Read probing that CHAR_POWER and CHAR_BRIGHTNESS_CCT both return the
+device's genuine live state, even though the vendor app itself never reads
+them back (it just trusts its own locally cached last-sent values, which is
+why no Read ever showed up in any capture of the app during RE).
 """
 from __future__ import annotations
 
@@ -52,7 +54,7 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class NewlabState:
-    """Best-known state of the light, tracked optimistically (no reliable read-back)."""
+    """Best-known state of the light - optimistic after a write, real after a refresh."""
 
     is_on: bool = False
     brightness: int = 255  # 0-255, Home Assistant's native brightness scale, 1:1 with the device byte
@@ -172,6 +174,47 @@ class NewlabBLEClient:
     async def _write_brightness_cct(self) -> None:
         payload = bytes([self.state.cct, self.state.brightness, 0x00, 0x00])
         await self._write_with_auth(CHAR_BRIGHTNESS_CCT, payload, "set brightness/CCT")
+
+    async def async_refresh_state(self) -> None:
+        """Read the device's real current state via GATT Read and update self.state.
+
+        Confirmed via direct GATT Read probing (2026-08-25): CHAR_POWER and
+        CHAR_BRIGHTNESS_CCT both support a genuine read-back of the device's
+        live state. Two real reads taken with only the brightness changed
+        between them came back with only the brightness byte differing,
+        byte-for-byte matching the change made - not a cached/static value.
+
+        Raises NewlabBLEError on any BLE failure. Does not retry - callers
+        (e.g. a periodic poll) can just skip a failed refresh and try again
+        next cycle rather than treating one missed read as fatal.
+        """
+        async with self._write_lock:
+            try:
+                client = await self._ensure_connected()
+                await self._send_auth(client)
+                power_raw = await client.read_gatt_char(CHAR_POWER)
+                cct_raw = await client.read_gatt_char(CHAR_BRIGHTNESS_CCT)
+            except (BleakError, asyncio.TimeoutError) as err:
+                raise NewlabBLEError(
+                    f"Failed to read state from Newlab light {self.address}: {err}"
+                ) from err
+
+        if len(power_raw) < 2 or len(cct_raw) < 2:
+            raise NewlabBLEError(
+                f"Newlab light {self.address} returned an unexpectedly short state "
+                f"read (power={power_raw.hex()}, brightness/cct={cct_raw.hex()})"
+            )
+
+        self.state.is_on = power_raw[0] == POWER_ON_PAYLOAD[0] and power_raw[1] == POWER_ON_PAYLOAD[1]
+        self.state.cct = cct_raw[0]
+        self.state.brightness = cct_raw[1]
+        _LOGGER.debug(
+            "Newlab light %s state refreshed: is_on=%s brightness=%d cct=%d",
+            self.address,
+            self.state.is_on,
+            self.state.brightness,
+            self.state.cct,
+        )
 
     async def async_apply(
         self,

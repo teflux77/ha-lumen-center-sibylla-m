@@ -48,12 +48,14 @@ and HACS will offer the update in its normal update-check flow.
   is connected (even just left open in the background) while Home Assistant tries to connect, one of
   them will get refused or dropped. Keep the phone app closed once Home Assistant is managing the
   light, or expect occasional "not found"/timeout errors when both are trying to use it.
-- **State is optimistic, not read back from the device.** This driver has no reliable way to report
-  its actual current state over BLE (no working Read/Notify was found for on/off, brightness, or
-  CCT in any capture taken during RE). What Home Assistant shows is "the last command we successfully
-  sent", not a live readout. If the light is controlled by some other means (power cut at the wall,
-  a physical switch, etc.) Home Assistant's shown state can drift from reality until the next command
-  is sent through it.
+- **State is optimistic between refreshes, and reconciled against the real device every 60s.**
+  Right after a command, Home Assistant shows "what we just told the light to do" instantly, without
+  waiting on a round trip. Separately, a background GATT Read every 60 seconds (see
+  `_STATE_REFRESH_INTERVAL` in `light.py`) confirms the light's actual on/off, brightness, and CCT and
+  corrects Home Assistant's display if it drifted — e.g. the light was controlled by the vendor app or
+  power-cycled at the wall. A single missed refresh (for instance, the vendor app is currently holding
+  the only available BLE connection slot) is not treated as an error — it just retries on the next
+  cycle instead of flapping the entity to unavailable.
 - **A hardcoded, cleartext "auth" token is required by the device itself** (not something this
   integration added) — see the RE notes for detail. This is a limitation of the light's own firmware,
   not a security feature; nothing to configure here, just worth knowing.
@@ -65,6 +67,14 @@ and HACS will offer the update in its normal update-check flow.
 for the Sibylla M: "LED Dinamic White Control DWC 2700/6300k CRI>90" (30W for the M size). If you're
 using this integration with a different fixture running the same Newlab Go protocol, edit those two
 constants to match your own datasheet before restarting.
+
+## Example dashboard
+
+`dashboards/example_dashboard.yaml` has ready-to-paste Lovelace card examples — a `light` card and a
+`tile` card, both of which natively render the on/off toggle, brightness slider, and color-temperature
+slider for `ColorMode.COLOR_TEMP` entities out of the box (no custom card / frontend dependency
+needed). Swap in your real `light.*` entity_id and drop it into a dashboard view's YAML, or use it as
+a reference for the UI card editor.
 
 ## Known limitations / not yet implemented
 
@@ -84,6 +94,8 @@ constants to match your own datasheet before restarting.
 hacs.json                 HACS repository metadata
 LICENSE                    MIT
 README.md
+dashboards/
+└── example_dashboard.yaml  copy-paste Lovelace light/tile card examples
 custom_components/newlab_ble/
 ├── __init__.py        entry setup/unload, forwards to the light platform
 ├── manifest.json       domain, bluetooth discovery matcher, requirements

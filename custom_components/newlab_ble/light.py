@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.bluetooth import async_ble_device_from_address
@@ -16,11 +17,20 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_time_interval
 
 from .client import NewlabBLEClient, NewlabBLEError
 from .const import DOMAIN, MAX_COLOR_TEMP_KELVIN, MIN_COLOR_TEMP_KELVIN
 
 _LOGGER = logging.getLogger(__name__)
+
+# How often to reconcile Home Assistant's optimistic state against the
+# device's real state via a GATT Read. Confirmed working 2026-08-25 (see
+# client.py). Deliberately not aggressive - each refresh is a full BLE
+# connect+read round trip, and this device only accepts one central
+# connection at a time, so polling too often increases contention with the
+# vendor app or anything else that might connect to it.
+_STATE_REFRESH_INTERVAL = timedelta(seconds=60)
 
 
 async def async_setup_entry(
@@ -48,11 +58,14 @@ class NewlabLight(LightEntity):
     """A Newlab Go BLE CCT light.
 
     State (on/off, brightness, color temperature) is tracked optimistically
-    by the underlying NewlabBLEClient - this device has no reliable way to
-    read its actual current state back over BLE, so what Home Assistant
-    shows is "what we last successfully told it to do", not a live readout.
-    A failed write marks the entity unavailable rather than silently
-    pretending it succeeded.
+    by the underlying NewlabBLEClient for instant UI feedback right after a
+    command, and reconciled every _STATE_REFRESH_INTERVAL via a real GATT
+    Read (confirmed working - see client.py) to catch drift from the light
+    being controlled some other way (the vendor app, a physical power cut,
+    etc.). A failed write marks the entity unavailable rather than silently
+    pretending it succeeded; a single failed periodic refresh does not,
+    since a BLE read failing while e.g. the vendor app holds the only
+    available connection slot is expected and transient.
     """
 
     _attr_has_entity_name = True
@@ -74,6 +87,7 @@ class NewlabLight(LightEntity):
             model="Newlab Go BLE CCT driver",
         )
         self._attr_available = True
+        self._unsub_refresh: Any = None
         client.register_disconnected_callback(self._handle_disconnected)
 
     def _handle_disconnected(self) -> None:
@@ -119,7 +133,47 @@ class NewlabLight(LightEntity):
             self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
-        """Keep the BLEDevice reference fresh as Home Assistant's Bluetooth manager rescans."""
+        """Keep the BLEDevice reference fresh, seed real state, and start periodic refresh."""
         ble_device = async_ble_device_from_address(self.hass, self._client.address, connectable=True)
         if ble_device is not None:
             self._client.set_ble_device(ble_device)
+
+        try:
+            await self._client.async_refresh_state()
+        except NewlabBLEError as err:
+            # Not fatal - fall back to NewlabState's defaults and let the
+            # next periodic refresh (or the first command) sort it out.
+            _LOGGER.debug(
+                "Newlab light %s: initial state read failed, starting from defaults: %s",
+                self._client.address,
+                err,
+            )
+
+        self._unsub_refresh = async_track_time_interval(
+            self.hass, self._async_periodic_refresh, _STATE_REFRESH_INTERVAL
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Stop the periodic refresh timer when the entity is being removed."""
+        if self._unsub_refresh is not None:
+            self._unsub_refresh()
+            self._unsub_refresh = None
+
+    async def _async_periodic_refresh(self, now: Any) -> None:
+        """Reconcile our optimistic state against the device's real state.
+
+        Deliberately does not touch _attr_available on failure - a single
+        missed poll (e.g. the vendor app currently holds the only BLE
+        connection slot) is expected from time to time and shouldn't flap
+        the entity's availability the way a failed *command* should.
+        """
+        try:
+            await self._client.async_refresh_state()
+        except NewlabBLEError as err:
+            _LOGGER.debug(
+                "Newlab light %s: periodic state refresh failed (will retry next interval): %s",
+                self._client.address,
+                err,
+            )
+            return
+        self.async_write_ha_state()
