@@ -1,0 +1,19 @@
+{
+  "config": {
+    "step": {
+      "confirm": {
+        "description": "Add the Newlab Go light \"{name}\" to Home Assistant?"
+      },
+      "user": {
+        "description": "Pick a discovered Newlab Go light to add.",
+        "data": {
+          "address": "Device"
+        }
+      }
+    },
+    "abort": {
+      "no_devices_found": "No Newlab Go lights were found advertising nearby. Make sure the light is powered on and within Bluetooth range of the adapter.",
+      "already_configured": "This light is already configured."
+    }
+  }
+}
