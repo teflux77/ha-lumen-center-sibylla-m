@@ -166,6 +166,12 @@ class NewlabLight(LightEntity):
         missed poll (e.g. the vendor app currently holds the only BLE
         connection slot) is expected from time to time and shouldn't flap
         the entity's availability the way a failed *command* should.
+
+        On success, however, this DOES clear _attr_available back to True.
+        A successful GATT read is direct proof the device is reachable
+        again, so there's no reason to keep showing unavailable (e.g. after
+        an earlier failed command) and make the user wait for another
+        command to clear it - the next poll already did the same job.
         """
         try:
             await self._client.async_refresh_state()
@@ -176,4 +182,5 @@ class NewlabLight(LightEntity):
                 err,
             )
             return
+        self._attr_available = True
         self.async_write_ha_state()
