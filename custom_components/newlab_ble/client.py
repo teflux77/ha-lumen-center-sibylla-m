@@ -40,6 +40,7 @@ from bleak_retry_connector import (
 )
 
 from .const import (
+    AUTH_TOKEN,
     CHAR_AUTH,
     CHAR_BRIGHTNESS_CCT,
     CHAR_POWER,
@@ -49,12 +50,6 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-# Delay between writing the auth token and the real command write. See the
-# comment in _write_with_auth - without this the firmware intermittently
-# rejects the immediately-following write with ATT error 0x0e "Unlikely
-# Error". Kept short since this runs on every command.
-_AUTH_SETTLE_DELAY = 0.15  # seconds
 
 
 @dataclass
@@ -73,10 +68,9 @@ class NewlabBLEError(Exception):
 class NewlabBLEClient:
     """Manages a persistent BLE connection to one Newlab Go light and speaks its protocol."""
 
-    def __init__(self, ble_device: BLEDevice, address: str, auth_token: bytes) -> None:
+    def __init__(self, ble_device: BLEDevice, address: str) -> None:
         self._ble_device = ble_device
         self.address = address
-        self._auth_token = auth_token
         self._client: BleakClient | None = None
         self._connect_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
@@ -140,8 +134,8 @@ class NewlabBLEClient:
             return client
 
     async def _send_auth(self, client: BleakClient) -> None:
-        """Send the mandatory auth/passcode token. Must precede every real command."""
-        await client.write_gatt_char(CHAR_AUTH, self._auth_token, response=True)
+        """Send the mandatory auth/keepalive token. Must precede every real command."""
+        await client.write_gatt_char(CHAR_AUTH, AUTH_TOKEN, response=True)
 
     async def _write_with_auth(self, char_uuid: str, payload: bytes, description: str) -> None:
         """Connect if needed, send the auth token, then the real write.
@@ -159,16 +153,6 @@ class NewlabBLEClient:
                 try:
                     client = await self._ensure_connected()
                     await self._send_auth(client)
-                    # Small settle delay before the real command. Without
-                    # this, the firmware intermittently rejects the write
-                    # with ATT error 0x0e "Unlikely Error" - a generic
-                    # firmware-side rejection, observed live 2026-08-25,
-                    # most likely the device's minimal BLE stack not being
-                    # ready to accept a second write immediately behind the
-                    # auth token write. Also more likely to surface under
-                    # BT/WiFi coexistence load on combo radios (e.g. Intel
-                    # AC 9260) that share a single antenna between the two.
-                    await asyncio.sleep(_AUTH_SETTLE_DELAY)
                     await client.write_gatt_char(char_uuid, payload, response=True)
                     return
                 except (BleakError, asyncio.TimeoutError) as err:
@@ -208,7 +192,6 @@ class NewlabBLEClient:
             try:
                 client = await self._ensure_connected()
                 await self._send_auth(client)
-                await asyncio.sleep(_AUTH_SETTLE_DELAY)
                 power_raw = await client.read_gatt_char(CHAR_POWER)
                 cct_raw = await client.read_gatt_char(CHAR_BRIGHTNESS_CCT)
             except (BleakError, asyncio.TimeoutError) as err:
