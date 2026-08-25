@@ -205,10 +205,19 @@ class NewlabLight(LightEntity):
     async def _async_periodic_refresh(self, now: Any) -> None:
         """Reconcile our optimistic state against the device's real state.
 
-        Deliberately does not touch _attr_available on failure - a single
+        Deliberately does not touch _attr_available on *failure* - a single
         missed poll (e.g. the vendor app currently holds the only BLE
         connection slot) is expected from time to time and shouldn't flap
         the entity's availability the way a failed *command* should.
+
+        On *success*, however, this DOES set _attr_available back to True.
+        Without this, a single failed command (async_turn_on/off, which
+        sets _attr_available = False) left the entity permanently
+        unavailable until the next successful command - a real GATT read
+        succeeding here proves the device is reachable again, so there is
+        no reason to keep showing unavailable and wait for a user action to
+        clear it. Confirmed as the root cause of "stuck unavailable with no
+        new errors in the log" reports.
         """
         try:
             await self._client.async_refresh_state()
@@ -219,4 +228,5 @@ class NewlabLight(LightEntity):
                 err,
             )
             return
+        self._attr_available = True
         self.async_write_ha_state()
