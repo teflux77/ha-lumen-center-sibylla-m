@@ -1,6 +1,7 @@
 """Light platform for the Newlab Go BLE CCT driver."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Any
@@ -31,6 +32,14 @@ _LOGGER = logging.getLogger(__name__)
 # connection at a time, so polling too often increases contention with the
 # vendor app or anything else that might connect to it.
 _STATE_REFRESH_INTERVAL = timedelta(seconds=60)
+
+# Retry budget for the *initial* state read only (async_added_to_hass), not
+# the periodic one - covers the common "HA just restarted (or the signal is
+# weak) and the Bluetooth manager hasn't re-resolved this device yet"
+# transient case without waiting a full 60s for the first periodic refresh
+# to self-correct.
+_INITIAL_REFRESH_ATTEMPTS = 3
+_INITIAL_REFRESH_RETRY_DELAY = 2.0  # seconds
 
 
 async def async_setup_entry(
@@ -133,21 +142,53 @@ class NewlabLight(LightEntity):
             self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
-        """Keep the BLEDevice reference fresh, seed real state, and start periodic refresh."""
+        """Keep the BLEDevice reference fresh, seed real state, and start periodic refresh.
+
+        The initial read is retried a few times with a short delay before
+        giving up: right after a HA restart, or with a weak BLE signal, the
+        Bluetooth manager commonly hasn't re-resolved this device yet on
+        the first attempt. Until a real read succeeds, the entity is marked
+        unavailable rather than showing NewlabState's defaults as if they
+        were the device's genuine state - unavailable is honest, a
+        confidently wrong "off" is not.
+        """
         ble_device = async_ble_device_from_address(self.hass, self._client.address, connectable=True)
         if ble_device is not None:
             self._client.set_ble_device(ble_device)
 
-        try:
-            await self._client.async_refresh_state()
-        except NewlabBLEError as err:
-            # Not fatal - fall back to NewlabState's defaults and let the
-            # next periodic refresh (or the first command) sort it out.
-            _LOGGER.debug(
-                "Newlab light %s: initial state read failed, starting from defaults: %s",
+        self._attr_available = False
+        last_err: NewlabBLEError | None = None
+        for attempt in range(1, _INITIAL_REFRESH_ATTEMPTS + 1):
+            try:
+                await self._client.async_refresh_state()
+                self._attr_available = True
+                break
+            except NewlabBLEError as err:
+                last_err = err
+                _LOGGER.debug(
+                    "Newlab light %s: initial state read failed (attempt %d/%d): %s",
+                    self._client.address,
+                    attempt,
+                    _INITIAL_REFRESH_ATTEMPTS,
+                    err,
+                )
+                if attempt < _INITIAL_REFRESH_ATTEMPTS:
+                    await asyncio.sleep(_INITIAL_REFRESH_RETRY_DELAY)
+
+        if not self._attr_available:
+            # Still unresolved after retries (device off/out of range, or
+            # something else holding the only connection slot) - not
+            # fatal, the next periodic refresh or the first command will
+            # resolve it, but don't claim a default state in the meantime.
+            _LOGGER.warning(
+                "Newlab light %s: could not read initial state after %d attempts, "
+                "showing unavailable until next refresh: %s",
                 self._client.address,
-                err,
+                _INITIAL_REFRESH_ATTEMPTS,
+                last_err,
             )
+
+        self.async_write_ha_state()
 
         self._unsub_refresh = async_track_time_interval(
             self.hass, self._async_periodic_refresh, _STATE_REFRESH_INTERVAL
